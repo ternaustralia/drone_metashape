@@ -8,8 +8,8 @@ metashape_proc.py run from Metashape GUI to generate orthomosaics. User input is
 2. Step-by-step procesing using the Metashape GUI  
 metashape_only_upd_cam_pos.py run as a part of the step-by-step workflow to update camera positions in the Metashape project. 
 
-3. Custom widget within Metashape  
-This script is only a prototype of an automated processing workflow through a custom widget within Metashape. For this option testing/metashape_proc_widget.py and upd_micasense_pos.py must be copied to C:\Users\<username>\AppData\Local\Agisoft\Metashape Pro\scripts\. For more information refer to Appendix 5 in the [Drone RGB and Multispectral Processing Protocol](https://www.tern.org.au/field-survey-apps-and-protocols/). 
+3. Prototype only: custom widget within Metashape  
+This script is a prototype of an automated processing workflow through a custom widget within Metashape. For this option testing/metashape_proc_widget.py and upd_micasense_pos.py must be copied to C:\Users\<username>\AppData\Local\Agisoft\Metashape Pro\scripts\. For more information refer to Appendix 5 in the [Drone RGB and Multispectral Processing Protocol](https://www.tern.org.au/field-survey-apps-and-protocols/). 
 
 
 **Funding**: This project was funded by TERN Landscapes  
