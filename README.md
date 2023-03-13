@@ -3,9 +3,11 @@ These workflows were developed for RGB and multispectral imagery collected simul
 
 One of the following workflows can be used to generate co-registered RGB and multispectral orthomosaics. For a summary of the processing steps and information on Agisoft Metashape setup, please refer to the [Drone RGB and Multispectral Processing Protocol](https://www.tern.org.au/field-survey-apps-and-protocols/). 
 1. Automated processing workflow  
+Uses scripts metashape_proc.py and upd_micasense_pos.py. 
 metashape_proc.py run from Metashape GUI to generate orthomosaics. User input is required to select images for MicaSense reflectance calibration. 
 
 2. Step-by-step procesing using the Metashape GUI  
+Uses scripts metashape_only_upd_cam_pos.py and upd_micasense_pos.py. 
 metashape_only_upd_cam_pos.py run as a part of the step-by-step workflow to update camera positions in the Metashape project. 
 
 3. Prototype only: custom widget within Metashape  
