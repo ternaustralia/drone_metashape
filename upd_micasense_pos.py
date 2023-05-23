@@ -24,7 +24,7 @@ import glob
 import numpy as np
 import exifread
 import datetime
-from pyproj import Transformer
+from pyproj.transformer import TransformerGroup
 
 ###############################################################################
 # Variable declarations, constants
@@ -152,9 +152,27 @@ def ret_micasense_pos(mrk_folder, micasense_folder, image_suffix, epsg_crs, out_
     mica_pos = []
     mica_count = 0
     
-    # Used to convert P1 positions from Lat/Lon to projected coordinate system
-    transformer = Transformer.from_crs(EPSG_4326, int(epsg_crs))
-    
+    # Used to convert P1 positions from WGS84 Lat/Lon (EPSG: 4326) to projected coordinate system
+    # Assumption that '-crs' input by user (TERN data across Australia only) is GDA2020 projected coordinate system.
+    # E.g. EPSG: 7855 for Tasmania
+
+    # Issue in pyproj/proj version available for py3.9/Metashape Pro 2.0.1 where a different transformation (to
+    # Metashape/previous Proj version) is chosen.
+    # Fix in later PROJ version has been to chose transformation with fewer steps - which in the case of GDA2020
+    # projected CS is the one chosen in Metashape as well.
+    # see https://github.com/OSGeo/PROJ/pull/3248
+    transf_group = TransformerGroup(EPSG_4326, int(epsg_crs))
+
+    # Specify pipeline to avoid issues with different transformers being chosen depending on PROJ version
+    # More info:https://github.com/pyproj4/pyproj/issues/989#issuecomment-974149918
+    step_count = []
+    for tr in transf_group.transformers:
+        step_count.append(str(tr).count("step")) # count 'steps' in each pipeline
+
+    # Revisit below fix to use transformer with fewer steps in case of any future updates to Metashape/PyProj/PROJ
+    min_step_idx = step_count.index(min(step_count))
+    transformer = transf_group.transformers[min_step_idx]
+
     # List of MicaSense master band images
     os.chdir(micasense_folder)
     filelist = glob.glob("**/IMG*_" + str(image_suffix)+".tif", recursive=True)
@@ -214,7 +232,7 @@ def ret_micasense_pos(mrk_folder, micasense_folder, image_suffix, epsg_crs, out_
             alt_value = float(altitude.values[0].num) / float(altitude.values[0].den)
         if altitude_ref == 1:
             print("GPS altitude ref is below sea level")
-    
+
         E, N = transformer.transform(lat_value, lon_value)
         mica_pos.append([E, N, alt_value])
         
@@ -271,7 +289,7 @@ def ret_micasense_pos(mrk_folder, micasense_folder, image_suffix, epsg_crs, out_
             time2 = 0
             upd_pos1 = [0, 0, 0]
             upd_pos2 = [0, 0, 0]
-            P1_triggered = False       
+            P1_triggered = False
             
         # When more than one flight for same mission, also ignore MicaSense images that triggered between flights    
         elif(mrk_file_count > 1):
@@ -282,7 +300,7 @@ def ret_micasense_pos(mrk_folder, micasense_folder, image_suffix, epsg_crs, out_
                     time2 = 0
                     upd_pos1 = [0, 0, 0]
                     upd_pos2 = [0, 0, 0]
-                    P1_triggered = False 
+                    P1_triggered = False
                     
         # Update MicaSense position for images that triggered within P1 times.           
         if P1_triggered:    

@@ -4,7 +4,7 @@ Created August 2021
 
 @author: Poornima Sivanandam
 
-Script to process DJI Zenmuse P1 (gimbal 1) and MicaSense (gimbal 2) images captured simultaneously
+Script to process DJI Zenmuse P1 (gimbal 1) and MicaSense RedEdge-MX/Dual (gimbal 2) images captured simultaneously
 using the Matrice 300 RTK drone system.
 
 Assumption that folder structure is as per the TERN protocols:
@@ -17,8 +17,9 @@ DRTK logs | plot/YYYYMMDD/drtk/
 Raw data paths can be overriden using 'Optional Inputs'.
 
 Required Input:
-    -crs "<EPSG code for target projected coordinate reference system - used in MicaSense position interpolation>"
+    -crs "<EPSG code for target projected coordinate reference system. Also used in MicaSense position interpolation>"
     Example: -crs "7855"
+    See https://epsg.org/home.html
 
 Optional Inputs:
     1. -multispec "path to multispectral level0_raw folder containing raw data"
@@ -29,17 +30,13 @@ Optional Inputs:
         Strength value to smooth RGB model. Default is low.
         Low: for low-lying vegetation (grasslands, shrublands), Medium and high: as appropriate for forested sites.
     4. When P1 (RGB camera) coordinates have to be blockshifted:
-        - indicate blockshift is necessary using "--blockshift_p1"
-        - Optional path to file containing DRTK init and AUSPOS cartesian coords passed using "-drtk <path to file>".
-          Default is relative to project location: ../../drtk/drtk_auspos_cartesian.txt
+        - Path to file containing DRTK init and AUSPOS cartesian coords passed using "-drtk <path to file>".
 
 Summary:
     * Add RGB and multispectral images.
     * Stop script for user input on calibration images.
-    * 'Resume Processing' clicked: complete the processing workflow.
+    * When 'Resume Processing' is clicked complete the processing workflow.
 
-To do:
-    * Check for Metashape version. Current script tested on v1.7.4 and v1.8.3
 """
 
 import argparse
@@ -50,22 +47,31 @@ import Metashape
 import os
 import sys
 from upd_micasense_pos import ret_micasense_pos
+import importlib
+import upd_micasense_pos
+
+importlib.reload(upd_micasense_pos)
 from pathlib import Path
 
 # Note: External modules imported were installed through:
 # "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" -m pip install <modulename>
 # See M300 data processing protocol for more information.
 
+# Metashape Python API updates in v2.0
+METASHAPE_V2_PLUS = False
+found_version = Metashape.app.version.split('.')  # e.g. 2.0.1
+if int(found_version[0]) >= 2:
+    METASHAPE_V2_PLUS = True
+
 ###############################################################################
 # Constants
 ###############################################################################
-GDA2020_COORD = collections.namedtuple('GDA2020_GCS', ['lat_decdeg', 'lon_decdeg', 'elliph'])
+GEOG_COORD = collections.namedtuple('Geog_CS', ['lat_decdeg', 'lon_decdeg', 'elliph'])
 
 SOURCE_CRS = Metashape.CoordinateSystem("EPSG::4326")  # WGS84
 
 CONST_a = 6378137  # Semi major axis
-CONST_inv_f = 298.257222101  # Inverse flattening 1/f
-
+CONST_inv_f = 298.257223563  # Inverse flattening 1/f WGS84 ellipsoid
 # Chunks in Metashape
 CHUNK_RGB = "rgb"
 CHUNK_MULTISPEC = "multispec"
@@ -78,10 +84,11 @@ DICT_SMOOTH_STRENGTH = {'low': 50, 'medium': 100, 'high': 200}
 ###############################################################################
 # Function definitions
 ###############################################################################
-def cartesian_to_gda2020(X, Y, Z):
+def cartesian_to_geog(X, Y, Z):
     """
     Author: Poornima Sivanandam
-    Convert Cartesian coordinates to GDA2020 and return Lat, Lon, ellipsoidal height as a named tuple.
+    Convert Cartesian coordinates to geographic coordinates using WGS84 ellipsoid.
+    Return Lat, Lon, ellipsoidal height as a named tuple.
     Calculations from Transformation_Conversion.xlsx at https://github.com/icsm-au/DatumSpreadsheets
     """
     f = 1 / CONST_inv_f
@@ -106,7 +113,7 @@ def cartesian_to_gda2020(X, Y, Z):
 
     ellip_h = p * math.cos(lat) + Z * math.sin(lat) - CONST_a * math.sqrt(1 - e_sq * math.sin(lat) ** 2)
 
-    conv_coord = GDA2020_COORD(lat_dec_deg, lon_dec_deg, ellip_h)
+    conv_coord = GEOG_COORD(lat_dec_deg, lon_dec_deg, ellip_h)
 
     return conv_coord
 
@@ -140,39 +147,32 @@ def proc_rgb():
         * Build and export orthomosaic
     """
     # If P1 positions are to be blockshifted, do the following:
-    # - Read the .txt file and convert Cartesian coordinates to GDA2020 Lat/Lon
-    # - Calculate the difference and apply the shift directly to the cameras (Lon/Lat/Ellipsoidal height) in 'P1' chunk
-    #  (Reference ellipsoids differ for WGS84 and GDA2020 (GRS 1980) - difference in the flattening which results in the semi-minor axis
-    #   being different by 0.0001 meters. This is ignored here in applying blockshift calculated using GDA2020 lat/Lon to WGS84 coordinates.)
-    # Convert coordinate system for Lat/Lon to target projected coordinate system (not necessary - done for consistency with multispec chunk).
+    # - Read the .txt file and convert Cartesian coordinates to WGS84 Lat/Lon
+    # - Calculate the difference and apply the shift directly to the cameras (Lon/Lat/Ellipsoidal height) in 'rgb' chunk
+    # Convert coordinate system for Lat/Lon to target projected coordinate system
 
     chunk = doc.findChunk(dict_chunks[CHUNK_RGB])
-
     proj_file = doc.path
+    blockshift_p1 = False
 
-    blockshift_p1 = args.blockshift_p1
-
-    if blockshift_p1:
+    if args.drtk is not None:
+        blockshift_p1 = True
+        DRTK_TXT_FILE = args.drtk
         print("P1 blockshift set")
-        if args.drtk:
-            CARTESIAN_COORDS = args.drtk
-        else:
-            # Default is relative to project location: ../../drtk/drtk_auspos_cartesian.txt
-            CARTESIAN_COORDS = str(Path(proj_file).parents[2] / "drtk/drtk_auspos_cartesian.txt")
 
         # read from txt/csv cartesian for RTK initial (line 1) and AUSPOS coords (line 2)
-        with open(CARTESIAN_COORDS, 'r') as file:
+        with open(DRTK_TXT_FILE, 'r') as file:
             line = file.readline()
             split_line = line.split(',')
-            init_gda2020 = cartesian_to_gda2020(float(split_line[0]), float(split_line[1]), float(split_line[2]))
+            drtk_field = cartesian_to_geog(float(split_line[0]), float(split_line[1]), float(split_line[2]))
             line = file.readline()
             split_line = line.split(',')
-            auspos_gda2020 = cartesian_to_gda2020(float(split_line[0]), float(split_line[1]), float(split_line[2]))
+            drtk_auspos = cartesian_to_geog(float(split_line[0]), float(split_line[1]), float(split_line[2]))
 
         # calc difference
-        diff_lat = round((auspos_gda2020.lat_decdeg - init_gda2020.lat_decdeg), 6)
-        diff_lon = round((auspos_gda2020.lon_decdeg - init_gda2020.lon_decdeg), 6)
-        diff_elliph = round((auspos_gda2020.elliph - init_gda2020.elliph), 6)
+        diff_lat = round((drtk_auspos.lat_decdeg - drtk_field.lat_decdeg), 6)
+        diff_lon = round((drtk_auspos.lon_decdeg - drtk_field.lon_decdeg), 6)
+        diff_elliph = round((drtk_auspos.elliph - drtk_field.elliph), 6)
         P1_shift = Metashape.Vector((diff_lon, diff_lat, diff_elliph))
 
         print("Shifting P1 cameras by: " + str(P1_shift))
@@ -212,7 +212,10 @@ def proc_rgb():
     #
     # Estimate image quality and remove cameras with quality < threshold
     #
-    chunk.analyzePhotos()
+    if METASHAPE_V2_PLUS:
+        chunk.analyzeImages()
+    else:
+        chunk.analyzePhotos()
     low_img_qual = []
     low_img_qual = [camera for camera in chunk.cameras if (float(camera.meta["Image/Quality"]) < IMG_QUAL_THRESHOLD)]
     if low_img_qual:
@@ -241,7 +244,6 @@ def proc_rgb():
     chunk.matchPhotos(downscale=1, generic_preselection=False, reference_preselection=True,
                       reference_preselection_mode=Metashape.ReferencePreselectionSource)
     chunk.alignCameras()
-
     doc.save()
 
     #
@@ -254,20 +256,29 @@ def proc_rgb():
     #
     # Build Dense Cloud
     #
-    # check if exist and reuse depthmap? # reuse_depth=True below
+    # check if exists and reuse depthmap? # reuse_depth=True below
     # downscale: ultra, high, medium, low, lowest: 1, 2, 4, 8, 16
     print("Build dense cloud")
     # Medium quality. And default: mild filtering.
     chunk.buildDepthMaps(downscale=4)
     doc.save()
-    chunk.buildDenseCloud()
+
+    if METASHAPE_V2_PLUS:
+        chunk.buildPointCloud()
+    else:
+        chunk.buildDenseCloud()
     doc.save()
 
     #
     # Build Mesh
     #
     print("Build mesh")
-    chunk.buildModel(surface_type=Metashape.HeightField, face_count=Metashape.MediumFaceCount)
+    if METASHAPE_V2_PLUS:
+        chunk.buildModel(surface_type=Metashape.HeightField, source_data=Metashape.PointCloudData,
+                         face_count=Metashape.MediumFaceCount)
+    else:
+        chunk.buildModel(surface_type=Metashape.HeightField, source_data=Metashape.DenseCloudData,
+                         face_count=Metashape.MediumFaceCount)
     doc.save()
 
     # Decimate and smooth mesh to use as orthorectification surface
@@ -291,12 +302,12 @@ def proc_rgb():
         # Round resolution to 2 decimal places
         res_xy = round(chunk.orthomosaic.resolution, 2)
 
-        # if p1/ folder does not exist in MRK_PATH save orthomosaic in the project directory
+        # if rgb/ folder does not exist in MRK_PATH save orthomosaic in the project directory
         # else save ortho in rgb/level1_proc/
         p1_idx = MRK_PATH.find("rgb")
         if p1_idx == -1:
             dir_path = Path(proj_file).parent
-            print("Cannot find p1/ folder. Saving ortho in " + str(dir_path))
+            print("Cannot find rgb/ folder. Saving ortho in " + str(dir_path))
         else:
             # create p1/level1_proc folder if it does not exist
             dir_path = Path(MRK_PATH[:p1_idx + len("rgb")]) / "level1_proc"
@@ -404,7 +415,7 @@ def proc_multispec():
     print("Setting primary channel to " + s.label)
     chunk.primary_channel = nir_idx + 1
 
-    #
+
     # GPS/INS offset for master sensor
     #
     # Offsets for RedEdge-MX Dual: (-0.097, 0.02, -0.08)
@@ -435,14 +446,17 @@ def proc_multispec():
     #
     # Estimate image quality and remove cameras with quality < threshold
     #
-    chunk.analyzePhotos()
+    if METASHAPE_V2_PLUS:
+        chunk.analyzeImages()
+    else:
+        chunk.analyzePhotos()
     low_img_qual = []
     low_img_qual = [camera.master for camera in chunk.cameras if (float(camera.meta["Image/Quality"]) < 0.5)]
     if low_img_qual:
         print("Removing cameras with Image Quality < %.1f" % 0.5)
         chunk.remove(list(set(low_img_qual)))
     doc.save()
-
+    #
     #
     # Calibrate Reflectance
     #
@@ -472,15 +486,6 @@ def proc_multispec():
     doc.save()
 
     #
-    # Build Dense Cloud
-    #
-    # Downscale: ultra, high, medium, low, lowest: 1, 2, 4, 8, 16
-    print("Build dense cloud")
-    chunk.buildDepthMaps(downscale=4)  # medium quality. and default: mild filtering.
-    chunk.buildDenseCloud()
-    doc.save()
-
-    #
     # Build and export orthomosaic
     #
     # Import P1 model for use in orthorectification
@@ -501,7 +506,7 @@ def proc_multispec():
         micasense_idx = MICASENSE_PATH.find("multispec")
         if micasense_idx == -1:
             dir_path = Path(proj_file).parent
-            print("Cannot find " +  "multispec/ folder. Saving ortho in " + str(dir_path))
+            print("Cannot find " + "multispec/ folder. Saving ortho in " + str(dir_path))
         else:
             # create multispec/level1_proc/ folder if it does not exist
             dir_path = Path(MICASENSE_PATH[:micasense_idx + len("multispec")]) / "level1_proc"
@@ -520,11 +525,10 @@ def proc_multispec():
         chunk.exportRaster(path=str(ortho_file), resolution_x=res_xy, resolution_y=res_xy,
                            image_format=Metashape.ImageFormatTIFF, save_alpha=False,
                            raster_transform=Metashape.RasterTransformValue,
-                           source_data=Metashape.OrthomosaicData, image_compression=compression)
+                           save_alpha=False, source_data=Metashape.OrthomosaicData, image_compression=compression)
         print("Exported orthomosaic: " + str(ortho_file))
 
     print("Multispec chunk processing complete!")
-
 
 
 def resume_proc():
@@ -549,8 +553,8 @@ parser.add_argument('-crs',
 parser.add_argument('-multispec', help='path to multispectral level0_raw folder with raw images')
 parser.add_argument('-rgb', help='path to RGB level0_raw folder that also has the MRK files')
 parser.add_argument('-smooth', help='Smoothing strength used to smooth RGB mesh low/med/high', default="low")
-parser.add_argument('--blockshift_p1', help='blockshift P1 coordinates', action='store_true')
-parser.add_argument('-drtk', help='file containing DRTK init and AUSPOS Cartesian coords')
+parser.add_argument('-drtk', help='If RGB coordinates to be blockshifted, file containing \
+                                                  DRTK base station coordinates from field and AUSPOS')
 
 global args
 args = parser.parse_args()
@@ -561,6 +565,13 @@ global doc
 doc = Metashape.app.document
 proj_file = doc.path
 
+# if Metashape project has not been saved
+if proj_file == '':
+    if args.rgb:
+        proj_file = str(Path(args.rgb).parents[0] / "metashape_project.psx")
+        print("Metashape project saved as %s" % proj_file)
+        doc.save(proj_file)
+
 # HARDCODED sensor names
 if args.rgb:
     MRK_PATH = args.rgb
@@ -568,7 +579,7 @@ else:
     # Default is relative to project location: ../rgb/level0_raw/
     MRK_PATH = Path(proj_file).parents[1] / "rgb/level0_raw"
     if not MRK_PATH.is_dir():
-        sys.exit("%s directory does not exist. Check and input paths using -p1 " % str(MRK_PATH))
+        sys.exit("%s directory does not exist. Check and input paths using -rgb " % str(MRK_PATH))
     else:
         MRK_PATH = str(MRK_PATH)
 
@@ -580,26 +591,28 @@ else:
     MICASENSE_PATH = Path(proj_file).parents[1] / "multispec/level0_raw"
 
     if not MICASENSE_PATH.is_dir():
-        sys.exit("%s directory does not exist. Check and input paths using -micasense " % str(MICASENSE_PATH))
+        sys.exit("%s directory does not exist. Check and input paths using -multispec " % str(MICASENSE_PATH))
     else:
         MICASENSE_PATH = str(MICASENSE_PATH)
+
+if args.drtk is not None:
+    DRTK_TXT_FILE = args.drtk
+    if not Path(DRTK_TXT_FILE).is_file():
+        sys.exit("%s file does not exist. Check and input correct path using -drtk option" % str(DRTK_TXT_FILE))
 
 if args.smooth not in DICT_SMOOTH_STRENGTH:
     sys.exit("Value for -smooth must be one of low, medium or high.")
 
 # Export blockshifted P1 positions. Not used in script. Useful for debug or to restart parts of script following any issues.
-P1_CAM_CSV = Path(proj_file).parent / "shifted_p1_pos.csv"
-
+P1_CAM_CSV = Path(proj_file).parent / "dbg_shifted_p1_pos.csv"
 # By default save the CSV with updated MicaSense positions in the MicaSense folder. CSV used within script.
 MICASENSE_CAM_CSV = Path(proj_file).parent / "interpolated_micasense_pos.csv"
-
 
 ##################
 # Add images
 ##################
 #
-# p1
-#
+# rgb
 p1_images = find_files(MRK_PATH, (".jpg", ".jpeg", ".tif", ".tiff"))
 chunk = doc.addChunk()
 chunk.label = CHUNK_RGB
@@ -613,7 +626,7 @@ if "EPSG::4326" not in str(chunk.crs):
     sys.exit("Chunk rgb: script expects images loaded to be in CRS WGS84 EPSG::4326")
 
 #
-# micasense
+# multispec
 #
 micasense_images = find_files(MICASENSE_PATH, (".jpg", ".jpeg", ".tif", ".tiff"))
 chunk = doc.addChunk()
@@ -634,20 +647,36 @@ dict_chunks = {}
 for get_chunk in doc.chunks:
     dict_chunks.update({get_chunk.label: get_chunk.key})
 
-
-# Stop script here. User to click 'Resume Processing' once following steps are complete.
-# see resume_proc() for processing steps.
+# Delete 'Chunk 1' that is created by default.
+if 'Chunk 1' in dict_chunks:
+    chunk = doc.findChunk(dict_chunks['Chunk 1'])
+    doc.remove(chunk)
+    doc.save()
+#
+# # Stop script here. User to click 'Resume Processing' once following steps are complete.
+# # see resume_proc() for processing steps.
 
 print("Add images completed.")
+print("###########################")
+print("###########################")
+print("###########################")
+print("###########################")
 print(
-    "Step 1. In the Workspace pane, select multispec chunk. Select Tools-Calibrate Relectance and 'Locate panels'. Once this is done, press Cancel.")
+    "Step 1. In the Workspace pane, select multispec chunk. Select Tools-Calibrate Reflectance and 'Locate panels'. Press Cancel once the panels have been located.")
+print(
+    "Note: The csv of the calibration panel will have to be loaded if this is the first run on the machine. See the protocol for more information.")
 print(
     "Step 2. In the Workspace pane under multispec chunk open Calibration images folder. Select and remove images not to be used for calibration.")
-print("Step 3. Press the 'Show Masks' icon in the tool bar and inspect the masks on calibration images.")
+print("Step 3. Press the 'Show Masks' icon in the toolbar and inspect the masks on calibration images.")
 print(
-    "Reflectance calibration will be completed in the script. Complete Steps 1 to 3 and press 'Resume Processing' to continue...")
+    "Complete Steps 1 to 3 and press 'Resume Processing' to continue. Reflectance calibration will be completed in the script.")
+print("###########################")
+print("###########################")
+print("###########################")
+print("###########################")
 
 label = "Resume processing"
 Metashape.app.removeMenuItem(label)
 Metashape.app.addMenuItem(label, resume_proc)
-Metashape.app.messageBox("Complete Steps 1 to 3 listed on the Console and click on 'Resume Processing' in the toolbar")
+Metashape.app.messageBox(
+    "Complete Steps 1 to 3 listed on the Console and then click on 'Resume Processing' in the toolbar")

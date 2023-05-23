@@ -11,7 +11,6 @@ Data |	Path | Example
 Raw data |	<plot>/YYYYMMDD/imagery/<sensor>/level0_raw/ |	SASMDD0001/20220519/imagery/rgb/level0_raw
 Data products |	<plot>/YYYYMMDD/imagery/<sensor>/level1_proc/	| SASMDD0001/20220519/imagery/multispec/level1_proc
 Metashape project |	plot/YYYYMMDD/imagery/metashape| SASRIV0001/20220516/imagery/metashape/
-DRTK logs | plot/YYYYMMDD/drtk/
 
 Raw data paths can be overriden using 'Optional Inputs'.
 
@@ -25,9 +24,7 @@ Optional Inputs:
     2. -rgb "path to RGB level0_raw folder which also has the MRK file(s)"
         Default is relative to project location: ../rgb/level0_raw/
     3. When P1 coordinates have to be blockshifted:
-        - indicate blockshift is necessary using "--blockshift_p1"
-        - Optional path to file containing DRTK init and AUSPOS cartesian coords passed using "-drtk <path to file>".
-          Default is relative to project location: ../../drtk/drtk_auspos_cartesian.txt
+        - path to file containing DRTK init and AUSPOS cartesian coords passed using "-drtk <path to txt file>".
 
 Summary:
 Note that following steps must be done before running script
@@ -35,8 +32,8 @@ Note that following steps must be done before running script
     2. Micasense - Locate panels, Calibration images selected and Reflectance calibration complete.
 
 chunk rgb:
-When '--blockshift_p1' is passed:
-    - In the .txt file passed through (-drtk - see above), the first line must have the comma separated cartesian coordinates from RINEX OBS file and the
+When '-drtk <path to txt file>' is passed:
+    - In the .txt file, the first line must have the comma separated cartesian coordinates from RINEX OBS file and the
     second line the coordinates from AUSPOS report. Contents of .txt file as an example :
         -3943357.3162, 2612482.7744, -4265086.5255
         -3943357.844, 2612483.133, -4265086.641
@@ -87,13 +84,14 @@ from upd_micasense_pos import ret_micasense_pos
 ###############################################################################
 # Constants
 ###############################################################################
-GDA2020_COORD = collections.namedtuple('GDA2020_GCS', ['lat_decdeg', 'lon_decdeg', 'elliph'])
+GEOG_COORD = collections.namedtuple('GDA2020_GCS', ['lat_decdeg', 'lon_decdeg', 'elliph'])
 
 SOURCE_CRS = Metashape.CoordinateSystem("EPSG::4326")  # WGS84
 GDA2020_CRS = Metashape.CoordinateSystem("EPSG::7844")  # GDA2020
 
 CONST_a = 6378137  # Semi major axis
-CONST_inv_f = 298.257222101  # Inverse flattening 1/f
+#CONST_inv_f = 298.257222101  # Inverse flattening 1/f
+CONST_inv_f = 298.257223563  # Inverse flattening 1/f WGS84 ellipsoid
 
 # Edit these values if necessary to refer to the correct P1/Micasense chunks in the project.
 CHUNK_MULTISPEC = "multispec"
@@ -103,7 +101,7 @@ CHUNK_RGB = "rgb"
 ###############################################################################
 # Function definitions
 ###############################################################################
-def cartesian_to_gda2020(X, Y, Z):
+def cartesian_to_geog(X, Y, Z):
     """
     Author: Poornima Sivanandam
     Convert Cartesian coordinates to GDA2020 and return Lat, Lon, ellipsoidal height as a named tuple.
@@ -131,7 +129,7 @@ def cartesian_to_gda2020(X, Y, Z):
 
     ellip_h = p * math.cos(lat) + Z * math.sin(lat) - CONST_a * math.sqrt(1 - e_sq * math.sin(lat) ** 2)
 
-    conv_coord = GDA2020_COORD(lat_dec_deg, lon_dec_deg, ellip_h)
+    conv_coord = GEOG_COORD(lat_dec_deg, lon_dec_deg, ellip_h)
 
     return conv_coord
 
@@ -145,51 +143,23 @@ parser = argparse.ArgumentParser(
 parser.add_argument('-crs',
                     help='EPSG code for target projected CRS for micasense cameras. E.g: 7855 for GDA2020/MGA zone 55',
                     required=True)
-parser.add_argument('-multispec', help='path to multispectral level0_raw folder with raw images')
-parser.add_argument('-rgb', help='path to RGB level0_raw folder that also has the MRK files')
-parser.add_argument('--blockshift_p1', help='blockshift P1 coordinates', action='store_true')
-parser.add_argument('-drtk', help='file containing DRTK init and AUSPOS Cartesian coords')
+parser.add_argument('-drtk', help='If RGB coordinates to be blockshifted, file containing \
+                                                  DRTK base station coordinates from field and AUSPOS')
 
 args = parser.parse_args()
-MRK_PATH = args.rgb
-MICASENSE_PATH = args.multispec
 TARGET_CRS = Metashape.CoordinateSystem("EPSG::" + args.crs)
-blockshift_p1 = args.blockshift_p1
+
+if args.drtk is not None:
+    blockshift_p1 = True
+    DRTK_TXT_FILE = args.drtk
+    if not Path(DRTK_TXT_FILE).is_file():
+        sys.exit("%s file does not exist. Check and input correct path using -drtk option" % str(DRTK_TXT_FILE))
+else:
+    blockshift_p1 = False
 
 # Metashape project
 doc = Metashape.app.document
 proj_file = doc.path
-
-# HARDCODED sensor names
-if args.rgb:
-    MRK_PATH = args.rgb
-else:
-    # Default is relative to project location: ../rgb/level0_raw
-    MRK_PATH = Path(proj_file).parents[1] / "rgb/level0_raw"
-    if not MRK_PATH.is_dir():
-        sys.exit("%s directory does not exist. Check and input paths using -p1 " % str(MRK_PATH))
-    else:
-        MRK_PATH = str(MRK_PATH)
-
-# TODO needs update when other sensors are used
-if args.multispec:
-    MICASENSE_PATH = args.multispec
-else:
-    # Default is relative to project location: ../multispec/level0_raw
-    MICASENSE_PATH = Path(proj_file).parents[1] / "multispec/level0_raw"
-
-    if not MICASENSE_PATH.is_dir():
-        sys.exit("%s directory does not exist. Check and input paths using -multispec " % str(MICASENSE_PATH))
-    else:
-        MICASENSE_PATH = str(MICASENSE_PATH)
-
-if blockshift_p1:
-    print("P1 blockshift set")
-    if args.drtk:
-        CARTESIAN_COORDS = args.drtk
-    else:
-        # Default is relative to project location: ../../drtk/drtk_auspos_cartesian.txt
-        CARTESIAN_COORDS = str(Path(proj_file).parents[2] / "drtk/drtk_auspos_cartesian.txt")
 
 # Export blockshifted P1 positions. Not used in script. Useful for debug or to restart parts of script following any issues.
 P1_CAM_CSV = Path(proj_file).parent / "shifted_p1_pos.csv"
@@ -206,7 +176,13 @@ dict_chunks = {}
 for get_chunk in doc.chunks:
     dict_chunks.update({get_chunk.label: get_chunk.key})
 
-# If P1 and micasense chunks not present, exit script.
+# Delete 'Chunk 1' that is created by default.
+if 'Chunk 1' in dict_chunks:
+    chunk = doc.findChunk(dict_chunks['Chunk 1'])
+    doc.remove(chunk)
+    doc.save()
+
+# If rgb and multispec chunks not present, exit script.
 chunks_exist = all(item in dict_chunks for item in check_chunk_list)
 if not chunks_exist:
     sys.exit(
@@ -240,22 +216,26 @@ if "EPSG::4326" not in str(chunk.crs):
 #
 chunk = doc.findChunk(dict_chunks[CHUNK_RGB])
 
+# Get path of RGB images
+rgb_image = chunk.cameras[0]
+rgb_image_path = Path(rgb_image.photo.path)
+MRK_PATH = str(rgb_image_path.parents[1]) #  HARDCODED path to RGB level_0 folder
+
 if blockshift_p1:
     # read from txt/csv cartesian for RTK initial (line 1) and AUSPOS coords (line 2)
-    with open(CARTESIAN_COORDS, 'r') as file:
+    with open(DRTK_TXT_FILE, 'r') as file:
         line = file.readline()
         split_line = line.split(',')
-        init_gda2020 = cartesian_to_gda2020(float(split_line[0]), float(split_line[1]), float(split_line[2]))
+        drtk_field = cartesian_to_geog(float(split_line[0]), float(split_line[1]), float(split_line[2]))
         line = file.readline()
         split_line = line.split(',')
-        auspos_gda2020 = cartesian_to_gda2020(float(split_line[0]), float(split_line[1]), float(split_line[2]))
+        drtk_auspos = cartesian_to_geog(float(split_line[0]), float(split_line[1]), float(split_line[2]))
 
     # calc difference
-    diff_lat = round((auspos_gda2020.lat_decdeg - init_gda2020.lat_decdeg), 6)
-    diff_lon = round((auspos_gda2020.lon_decdeg - init_gda2020.lon_decdeg), 6)
-    diff_elliph = round((auspos_gda2020.elliph - init_gda2020.elliph), 6)
+    diff_lat = round((drtk_auspos.lat_decdeg - drtk_field.lat_decdeg), 6)
+    diff_lon = round((drtk_auspos.lon_decdeg - drtk_field.lon_decdeg), 6)
+    diff_elliph = round((drtk_auspos.elliph - drtk_field.elliph), 6)
     P1_shift = Metashape.Vector((diff_lon, diff_lat, diff_elliph))
-    # P1_shift = Metashape.Vector([-3e-06, -4e-06, -1.677178])
 
     print("Shifting P1 cameras by: " + str(P1_shift))
 
@@ -268,7 +248,7 @@ if blockshift_p1:
         else:
             camera.reference.location = camera.reference.location + P1_shift
 
-# Convert to projected coodinate system
+# Convert to projected coordinate system
 for camera in chunk.cameras:
     if not camera.reference.location:
         continue
@@ -287,6 +267,11 @@ doc.save()
 ######################
 # Move to micasense chunk
 chunk = doc.findChunk(dict_chunks[CHUNK_MULTISPEC])
+
+# Get path of multispec images
+multispec_image = chunk.cameras[0]
+multispec_image_path = Path(multispec_image.photo.path)
+MICASENSE_PATH = str(multispec_image_path.parents[2]) # HARDCODED path to the multispec level_0 folder
 
 # Get image suffix of master camera
 camera = chunk.cameras[0]
