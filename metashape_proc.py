@@ -523,7 +523,7 @@ def proc_multispec():
         compression.tiff_overviews = True
 
         chunk.exportRaster(path=str(ortho_file), resolution_x=res_xy, resolution_y=res_xy,
-                           image_format=Metashape.ImageFormatTIFF, save_alpha=False,
+                           image_format=Metashape.ImageFormatTIFF, 
                            raster_transform=Metashape.RasterTransformValue,
                            save_alpha=False, source_data=Metashape.OrthomosaicData, image_compression=compression)
         print("Exported orthomosaic: " + str(ortho_file))
