@@ -13,6 +13,9 @@ metashape_only_upd_cam_pos.py run as a part of the step-by-step workflow to upda
 3. Prototype only: custom widget within Metashape  
 This script is a prototype of an automated processing workflow through a custom widget within Metashape. For this option testing/metashape_proc_widget.py and upd_micasense_pos.py must be copied to C:\Users\<username>\AppData\Local\Agisoft\Metashape Pro\scripts\. For more information please refer to Appendix 5 in the [Drone RGB and Multispectral Processing Protocol](https://www.tern.org.au/field-survey-apps-and-protocols/). 
 
+4. Other examples<br>
+examples\metashape_blockshift.py - code to only perform the blockshift of images in a Metashape chunk using AUSPOS results. 
+examples\metashape_proc_p1.py - only process RGB images captured using Zenmuse P1 on **gimbal 1 of dual mount**. **Remove the GPS/INS offset code if P1 was on single mount gimbal.**
 
 **Funding**: This project was funded by TERN Landscapes  
 **Authors**: Poornima Sivanandam, Darren Turner, Arko Lucieer, School of Geography, Planning and Spatial Sciences, University of Tasmania  
