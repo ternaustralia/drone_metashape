@@ -426,12 +426,9 @@ def proc_multispec():
         set_primary = 'Panchro'
     for s in chunk.sensors:
         if s.label.find(set_primary) != -1:
-            set_primary_idx = s.layer_index
+            print("Setting primary channel to " + s.label)
+            chunk.primary_channel = s.layer_index
             break
-
-    # channels are numbered from 1 to ... So add 1 to idx for channel.
-    print("Setting primary channel to " + s.label)
-    chunk.primary_channel = set_primary_idx + 1
 
 
     # GPS/INS offset for master sensor
