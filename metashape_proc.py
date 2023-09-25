@@ -46,6 +46,8 @@ import numpy as np
 import Metashape
 import os
 import sys
+import exifread
+from collections import defaultdict
 from upd_micasense_pos import ret_micasense_pos
 import importlib
 import upd_micasense_pos
@@ -80,6 +82,18 @@ IMG_QUAL_THRESHOLD = 0.7
 
 DICT_SMOOTH_STRENGTH = {'low': 50, 'medium': 100, 'high': 200}
 
+# Lever-arm offsets for different sensors on *Matrice 300*
+# TODO: update this for other sensors and drone platforms
+P1_GIMBAL1_OFFSET = (0.087, 0.0, 0.0)
+
+# Measure lever-arm offsets (X, Y, Z) from the single gimbal position to the ‘master’ camera (by default, the lowest wavelength)
+# In Metashape, the offsets are positive with respect to the actual camera positions. 
+# See Metashape manual or TERN RGB Multispectral processing protocol for details.
+offset_dict = defaultdict(dict)
+offset_dict['RedEdge-M']['Red'] = (-0.097, -0.03, -0.06)
+offset_dict['RedEdge-M']['Dual'] = (-0.097, 0.02, -0.08)
+offset_dict['RedEdge-P']['Red'] = (0,0,0)
+offset_dict['RedEdge-P']['Dual'] = (0,0,0)
 
 ###############################################################################
 # Function definitions
@@ -228,7 +242,7 @@ def proc_rgb():
     #
     print(chunk.sensors[0].antenna.location_ref)
     print("Update GPS/INS offset for P1")
-    chunk.sensors[0].antenna.location_ref = Metashape.Vector((0.087, 0.0, 0.0))
+    chunk.sensors[0].antenna.location_ref = Metashape.Vector(P1_GIMBAL1_OFFSET)
     print(chunk.sensors[0].antenna.location_ref)
 
     #
@@ -402,33 +416,28 @@ def proc_multispec():
     # save project
     doc.save()
 
-    #
+
     # Set primary channel
     #
     # Get index of NIR band. Micasense Dual: NIR is sensors[9], and in RedEdge-M sensors[4]
+    if cam_model == 'RedEdge-M':
+        set_primary = "NIR"
+    elif cam_model == 'RedEdge-P':
+        set_primary = 'Panchro'
     for s in chunk.sensors:
-        if s.label.find("NIR") != -1:
-            nir_idx = s.layer_index
+        if s.label.find(set_primary) != -1:
+            set_primary_idx = s.layer_index
             break
 
     # channels are numbered from 1 to ... So add 1 to idx for channel.
     print("Setting primary channel to " + s.label)
-    chunk.primary_channel = nir_idx + 1
+    chunk.primary_channel = set_primary_idx + 1
 
 
     # GPS/INS offset for master sensor
     #
-    # Offsets for RedEdge-MX Dual: (-0.097, 0.02, -0.08)
-    #             RedEdge-MX: (-0.097, -0.03, -0.06)
     print("Updating Micasense GPS offset")
-    # MicaSense Dual
-    if len(chunk.sensors) == 10:
-        chunk.sensors[0].antenna.location_ref = Metashape.Vector((-0.097, 0.02, -0.08))
-        # NOT USED - was used in naming ortho tif. Updated to generic "multispec"
-        micasense_sensor = "micasense_dual"
-    else:
-        chunk.sensors[0].antenna.location_ref = Metashape.Vector((-0.097, -0.03, -0.06))
-        micasense_sensor = "micasense"
+    chunk.sensors[0].antenna.location_ref = Metashape.Vector(MS_GIMBAL2_OFFSET)
 
     #
     # Set Raster Transform to calculate reflectance
@@ -436,8 +445,20 @@ def proc_multispec():
     print("Updating Raster Transform for relative reflectance")
     raster_transform_formula = []
     num_bands = len(chunk.sensors)
-    for band in range(1, num_bands + 1):
-        raster_transform_formula.append("B" + str(band) + "/32768")
+    if cam_model == 'RedEdge-M':
+        for band in range(1, num_bands + 1):
+            raster_transform_formula.append("B" + str(band) + "/32768")
+    elif cam_model == 'RedEdge-P':
+        # Skip Panchromatic band in multispec ortho.
+        # Panchro band: wavelength: 634.5 nm, Band 5 in RedEdge-P Dual and Band 3 in RedEdge-P.
+        if num_bands >= 10:
+            PANCHRO_BAND = 5
+        else:
+            PANCHRO_BAND = 3
+        for band in range(1, num_bands+1):
+            if band != PANCHRO_BAND:
+                raster_transform_formula.append("B" + str(band) + "/32768")
+
     chunk.raster_transform.formula = raster_transform_formula
     chunk.raster_transform.calibrateRange()
     chunk.raster_transform.enabled = True
@@ -523,7 +544,7 @@ def proc_multispec():
         compression.tiff_overviews = True
 
         chunk.exportRaster(path=str(ortho_file), resolution_x=res_xy, resolution_y=res_xy,
-                           image_format=Metashape.ImageFormatTIFF, 
+                           image_format=Metashape.ImageFormatTIFF,
                            raster_transform=Metashape.RasterTransformValue,
                            save_alpha=False, source_data=Metashape.OrthomosaicData, image_compression=compression)
         print("Exported orthomosaic: " + str(ortho_file))
@@ -572,7 +593,6 @@ if proj_file == '':
         print("Metashape project saved as %s" % proj_file)
         doc.save(proj_file)
 
-# HARDCODED sensor names
 if args.rgb:
     MRK_PATH = args.rgb
 else:
@@ -629,9 +649,11 @@ if "EPSG::4326" not in str(chunk.crs):
 # multispec
 #
 micasense_images = find_files(MICASENSE_PATH, (".jpg", ".jpeg", ".tif", ".tiff"))
+
 chunk = doc.addChunk()
 chunk.label = CHUNK_MULTISPEC
 chunk.addPhotos(micasense_images)
+doc.save()
 
 # Check that chunk is not empty and images are in default WGS84 CRS
 if len(chunk.cameras) == 0:
@@ -639,7 +661,35 @@ if len(chunk.cameras) == 0:
 if "EPSG::4326" not in str(chunk.crs):
     sys.exit("Multispec chunk: script expects images loaded to be in CRS WGS84 EPSG::4326")
 
-doc.save()
+# Check that lever-arm offsets are non-zero:
+# As this script is for RGB and MS images captured simultaneously on dual gimbal, lever-arm offsets cannot be 0.
+#  Zenmuse P1
+if P1_GIMBAL1_OFFSET == 0:
+    err_msg = "Lever-arm offset for P1 in dual gimbal mode cannot be 0. Update offset_dict and rerun_script."
+    Metashape.app.messageBox(err_msg)
+
+# MicaSense: get Camera Model from one of the images to check the lever-arm offsets for the relevant model
+sample_img = open(micasense_images[0], 'rb')
+exif_tags = exifread.process_file(sample_img)
+cam_model = str(exif_tags.get('Image Model'))
+
+# HARDCODED number of bands.
+if len(chunk.sensors) >= 10:
+    # Dual sensor (RedEdge-MX Dual: 10, RedEdge-P Dual: 11)
+    # Dual sensor: If offsets are 0, exit with error.
+    if offset_dict[cam_model]['Dual'] == (0, 0, 0):
+        err_msg = "Lever-arm offsets for " + cam_model + " Dual on gimbal 2 cannot be 0. Update offset_dict and rerun script."
+        Metashape.app.messageBox(err_msg)
+    else:
+        MS_GIMBAL2_OFFSET = offset_dict[cam_model]['Dual']
+else:
+    # RedEdge-MX or RedEdge-P (5-band or 6-band respectively): If offsets are 0, exit with error.
+    if offset_dict[cam_model]['Red'] == (0, 0, 0):
+        err_msg = "Lever-arm offsets for " + cam_model + " Red on gimbal 2 cannot be 0. Update offset_dict and rerun script."
+        Metashape.app.messageBox(err_msg)
+    else:
+        MS_GIMBAL2_OFFSET = offset_dict[cam_model]['Red']
+
 
 # Used to find chunks in proc_*
 check_chunk_list = [CHUNK_RGB, CHUNK_MULTISPEC]
@@ -655,7 +705,7 @@ if 'Chunk 1' in dict_chunks:
 #
 # # Stop script here. User to click 'Resume Processing' once following steps are complete.
 # # see resume_proc() for processing steps.
-
+doc.save()
 print("Add images completed.")
 print("###########################")
 print("###########################")
@@ -679,4 +729,4 @@ label = "Resume processing"
 Metashape.app.removeMenuItem(label)
 Metashape.app.addMenuItem(label, resume_proc)
 Metashape.app.messageBox(
-    "Complete Steps 1 to 3 listed on the Console and then click on 'Resume Processing' in the toolbar")
+    "Complete Steps 1 to 3 listed on the Console tab and then click on 'Resume Processing' in the toolbar")
